@@ -8,6 +8,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="styles.css" />
+    <script src="gsap.min.js"></script>
     <script src="i18n.js"></script>
     <script type="module" src="main.js" defer></script>
   </head>
@@ -25,7 +26,7 @@
         </div>
         <div class="brand-text">
           <h1>ModLinker</h1>
-          <span class="brand-tag" style="font-size: 11px;">V1.0.0</span>
+          <span class="brand-tag" style="font-size: 11px;">V2.0.0</span>
         </div>
       </div>
 
@@ -48,6 +49,14 @@
             <polyline points="10 9 9 9 8 9"/>
           </svg>
           <span data-i18n="nav.generate">マニフェスト生成</span>
+        </button>
+
+        <div class="nav-section-label" style="margin-top: 20px;" data-i18n="nav.v2_label">V2 新機能</div>
+        <button class="nav-item" id="nav-launcher-btn">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+          </svg>
+          <span data-i18n="nav.launcher">ワンクリック同期</span>
         </button>
 
         <div class="nav-section-label" style="margin-top: 20px;" data-i18n="nav.settings_label">設定</div>
@@ -325,6 +334,146 @@
         <div id="manual-dl-list" style="padding: 8px 16px;"></div>
       </section>
 
+      <!-- ═══ v2.0.0: ワンクリック同期 (公式ランチャー連携) パネル ═══ -->
+      <section id="panel-launcher" class="mode-panel" style="display: none;">
+        <div class="control-panel glass-card">
+          <div class="input-group">
+            <label style="display: flex; align-items: center; gap: 6px;">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+              </svg>
+              <span data-i18n="launcher.manifest_v2">マニフェストファイル (v2対応・v1も読み込み可)</span>
+            </label>
+            <div class="input-row">
+              <input type="text" id="launcher-manifest-input" placeholder="ファイルが選択されていません" data-i18n="sync.manifest_placeholder" data-i18n-attr="placeholder" spellcheck="false" readonly style="cursor: pointer;" />
+              <button class="btn-icon" id="launcher-browse-btn" title="ファイルを選択" data-i18n="common.select_file" data-i18n-attr="title" style="flex-shrink: 0;">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M5 19a2 2 0 01-2-2V7a2 2 0 012-2h4l2 2h6a2 2 0 012 2v1M5 19h14a2 2 0 002-2v-5a2 2 0 00-2-2H9a2 2 0 00-2 2v5a2 2 0 01-2 2z"/>
+                </svg>
+              </button>
+            </div>
+          </div>
+
+          <div class="input-group">
+            <label for="profile-name-input" style="display: flex; align-items: center; gap: 6px;">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/>
+                <circle cx="12" cy="7" r="4"/>
+              </svg>
+              <span data-i18n="launcher.profile_name">プロファイル名 (公式ランチャーに表示される名前)</span>
+            </label>
+            <input type="text" id="profile-name-input" placeholder="例: フレンドのサーバー" data-i18n="launcher.profile_name_placeholder" data-i18n-attr="placeholder" spellcheck="false" />
+          </div>
+
+          <!-- マニフェスト検出情報 -->
+          <div id="launcher-detect-box" class="launcher-detect-box" style="display: none;">
+            <div class="detect-row">
+              <span class="detect-label" data-i18n="launcher.detect_loader">ローダー:</span>
+              <span class="detect-value" id="detect-loader-value">—</span>
+            </div>
+            <div class="detect-row">
+              <span class="detect-label" data-i18n="launcher.detect_mc">MCバージョン:</span>
+              <span class="detect-value" id="detect-mc-value">—</span>
+            </div>
+            <div class="detect-row">
+              <span class="detect-label" data-i18n="launcher.detect_java">推奨Java:</span>
+              <span class="detect-value" id="detect-java-value">—</span>
+            </div>
+            <div class="detect-row">
+              <span class="detect-label" data-i18n="launcher.detect_mods">MOD数:</span>
+              <span class="detect-value" id="detect-mods-value">—</span>
+            </div>
+          </div>
+
+          <!-- ローダー手動指定 (マニフェストにローダー情報が無い場合) -->
+          <div class="input-group" id="loader-override-group" style="display: none;">
+            <label style="display: flex; align-items: center; gap: 6px;">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+                <path d="M7 11V7a5 5 0 0110 0v4"/>
+              </svg>
+              <span data-i18n="launcher.override_title">ローダーを指定して公式インストーラーを実行 (v1マニフェストの場合)</span>
+            </label>
+            <div class="launcher-opt-row">
+              <div class="opt-block">
+                <span class="opt-label" data-i18n="launcher.override_kind">ローダー種別</span>
+                <select id="loader-kind-select" class="opt-select">
+                  <option value="none" data-i18n="launcher.override_none">指定しない (MOD同期のみ)</option>
+                  <option value="fabric">Fabric</option>
+                  <option value="forge">Forge</option>
+                  <option value="neoforge">NeoForge</option>
+                </select>
+              </div>
+              <div class="opt-block">
+                <span class="opt-label" data-i18n="launcher.override_mc">Minecraft バージョン</span>
+                <input type="text" id="loader-mc-version-input" placeholder="例: 1.21.1" spellcheck="false" />
+              </div>
+            </div>
+          </div>
+
+          <!-- JVM / ZGC 最適化 -->
+          <div class="input-group">
+            <label style="display: flex; align-items: center; gap: 6px;">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="4" y="4" width="16" height="16" rx="2" ry="2"/>
+                <rect x="9" y="9" width="6" height="6"/>
+                <line x1="9" y1="1" x2="9" y2="4"/>
+                <line x1="15" y1="1" x2="15" y2="4"/>
+                <line x1="9" y1="20" x2="9" y2="23"/>
+                <line x1="15" y1="20" x2="15" y2="23"/>
+                <line x1="20" y1="9" x2="23" y2="9"/>
+                <line x1="20" y1="14" x2="23" y2="14"/>
+                <line x1="1" y1="9" x2="4" y2="9"/>
+                <line x1="1" y1="14" x2="4" y2="14"/>
+              </svg>
+              <span data-i18n="launcher.jvm_section">JVM / メモリ最適化</span>
+            </label>
+            <div class="launcher-opt-row">
+              <div class="opt-block">
+                <span class="opt-label" data-i18n="launcher.memory">メモリ割当</span>
+                <div id="memory-select" class="memory-chips">
+                  <button class="memory-chip" data-mb="4096">4GB</button>
+                  <button class="memory-chip" data-mb="6144">6GB</button>
+                  <button class="memory-chip" data-mb="8192">8GB</button>
+                  <button class="memory-chip" data-mb="10240">10GB</button>
+                  <button class="memory-chip" data-mb="12288">12GB</button>
+                  <button class="memory-chip" data-mb="16384">16GB</button>
+                </div>
+              </div>
+              <div class="opt-block">
+                <label class="checkbox-label zgc-toggle" style="cursor: pointer; display: flex; align-items: center; gap: 8px;">
+                  <input type="checkbox" id="zgc-toggle-checkbox" checked />
+                  <span data-i18n="launcher.zgc_toggle">🚀 ZGC最適化を有効にする</span>
+                </label>
+                <div class="hint-text" data-i18n="launcher.zgc_hint">Java 21 環境では世代別 ZGC (最大16GB)、Java 17 以下では安全のため G1GC (最大8GB) に自動フォールバックします。</div>
+              </div>
+            </div>
+            <div id="jvm-plan-preview" class="jvm-plan-preview" style="display: none;">
+              <div class="plan-title" data-i18n="launcher.jvm_preview">生成されるJVM引数 (プレビュー)</div>
+              <code id="jvm-plan-args"></code>
+            </div>
+          </div>
+
+          <button class="btn-primary btn-launcher" id="start-launcher-sync-btn">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+            </svg>
+            <span data-i18n="launcher.start">⚡ ワンクリック同期を開始</span>
+          </button>
+        </div>
+
+        <!-- 同期サマリー -->
+        <section class="results-section glass-card" id="launcher-summary-section" style="display: none;">
+          <div class="section-header">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="20 6 9 17 4 12"/>
+            </svg>
+            <span data-i18n="launcher.summary_title">同期完了サマリー</span>
+          </div>
+          <div id="launcher-summary-body" class="summary-body"></div>
+        </section>
+      </section>
+
       <!-- パネル2: マニフェスト生成モード -->
       <section id="panel-generate" class="mode-panel">
         <div class="control-panel glass-card">
@@ -515,6 +664,60 @@
       </section>
 
     </main>
+
+    <!-- ═══ v2.0.0: 📥 ダウンロード待機モーダル (スマート自動回収) ═══ -->
+    <div class="modal-overlay" id="watch-modal" style="display: none;">
+      <div class="watch-modal-card glass-card">
+        <div class="watch-modal-header">
+          <div class="watch-icon" id="watch-icon">
+            <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+              <polyline points="7 10 12 15 17 10"/>
+              <line x1="12" y1="15" x2="12" y2="3"/>
+            </svg>
+          </div>
+          <div>
+            <h3 data-i18n="watch.title">📥 手動MOD自動回収</h3>
+            <p class="watch-subtitle" data-i18n="watch.subtitle">ブラウザでのダウンロード完了を待っています。このモーダルを閉じると監視は自動停止します。</p>
+          </div>
+          <div class="watch-phase-badge" id="watch-phase-badge" data-i18n="watch.phase.waiting">待機中</div>
+        </div>
+
+        <!-- 対象MODリスト -->
+        <div class="watch-targets" id="watch-target-list"></div>
+
+        <!-- 監視先パス -->
+        <div class="watch-dir-row">
+          <span class="watch-dir-label">📁 <span data-i18n="watch.watch_dir">監視先:</span></span>
+          <code class="watch-dir-path" id="watch-dir-path">—</code>
+          <button class="btn-ghost" id="watch-change-dir-btn" data-i18n="watch.change_dir">フォルダを変更</button>
+        </div>
+
+        <!-- フォールバック導線 -->
+        <div class="watch-fallback">
+          <div class="watch-fallback-title" data-i18n="watch.fallback_title">自動検知しない環境 (Firefox/Tor等) の場合:</div>
+          <div class="watch-fallback-btns">
+            <button class="btn-ghost" id="watch-scan-now-btn">
+              <span data-i18n="watch.scan_now">🔍 今すぐダウンロードフォルダをスキャン</span>
+            </button>
+            <button class="btn-ghost" id="watch-pick-file-btn">
+              <span data-i18n="watch.pick_file">📂 ファイルを直接選択して配置</span>
+            </button>
+          </div>
+          <div class="drop-zone" id="watch-drop-zone">
+            <span data-i18n="watch.drop_hint">またはここにJARファイルをドラッグ＆ドロップ（複数一括対応）</span>
+          </div>
+        </div>
+
+        <!-- 状態メッセージ -->
+        <div class="watch-status" id="watch-status-msg"></div>
+
+        <div class="watch-modal-footer">
+          <button class="btn-primary" id="watch-done-btn" style="display: none;" data-i18n="watch.done">✔ 完了</button>
+          <button class="btn-danger" id="watch-cancel-btn" data-i18n="watch.cancel">キャンセル</button>
+        </div>
+      </div>
+    </div>
 
   
   </body>

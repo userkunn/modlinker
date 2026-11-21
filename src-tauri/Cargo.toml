@@ -1,6 +1,6 @@
 [package]
 name = "modlinker"
-version = "1.0.0"
+version = "2.0.0"
 description = "Minecraft MOD Sync Client"
 authors = ["you"]
 edition = "2021"
@@ -22,13 +22,16 @@ sha2 = "0.10"
 tokio = { version = "1", features = ["fs", "rt-multi-thread", "macros"] }
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 walkdir = "2"
-futures = "0.3"
 aws-sdk-s3 = "1.148.0"
 aws-config = "1.12.0"
 uuid = { version = "1.26.1", features = ["v4"] }
 tauri-plugin-fs = "2.5.2"
 zip = "8.6.0"
 toml = "1.1.6"
+notify = "8"
+sysinfo = "0.33"
+dirs = "6"
+open = "5"
 
 [profile.release]
 codegen-units = 1

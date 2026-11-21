@@ -1,4 +1,3 @@
-use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha512};
 use std::collections::HashMap;
@@ -11,6 +10,17 @@ use aws_config::Region;
 use aws_sdk_s3::{Client, config::Credentials, config::Builder as S3ConfigBuilder};
 use aws_sdk_s3::primitives::ByteStream;
 use uuid::Uuid;
+
+// ── v2.0.0 モジュール ────────────────────────────────────
+mod browser_paths;
+mod launcher;
+mod manifest;
+mod watcher;
+
+use launcher::jvm::{self, JvmPlan};
+use launcher::pipeline::LauncherSyncOptions;
+use manifest::{LoaderInfo, ManifestV2};
+use watcher::WatchTarget;
 
 // ── 型定義 ──────────────────────────────────────────────
 
@@ -43,6 +53,8 @@ struct DiffEntry {
     url: Option<String>,
     page_url: Option<String>,
     source: String,
+    #[serde(default)]
+    sha512: Option<String>, // v2.0: 手動MOD自動回収のハッシュ照合に使用
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -478,8 +490,8 @@ async fn check_sync_diff(app: AppHandle, game_path: String, manifest_json: Strin
         return Err(format!("指定されたゲームディレクトリが無効です: {}", game_path));
     }
 
-    let manifest: Vec<ModEntry> = serde_json::from_str(&manifest_json)
-        .map_err(|e| format!("マニフェストJSONの解析に失敗: {}", e))?;
+    let manifest_v2: ManifestV2 = ManifestV2::parse(&manifest_json)?;
+    let manifest = manifest_v2.mods;
 
     if manifest.is_empty() {
         return Err("マニフェストが空です。".into());
@@ -523,6 +535,7 @@ async fn check_sync_diff(app: AppHandle, game_path: String, manifest_json: Strin
             url: entry.download_url.clone(),
             page_url: entry.page_url.clone(),
             source: entry.source.clone(),
+            sha512: Some(entry.sha512.clone()),
         });
     }
 
@@ -714,6 +727,186 @@ fn open_browser(app: AppHandle, url: String) -> Result<(), String> {
     app.opener().open_url(url, None::<&str>).map_err(|e| e.to_string())
 }
 
+// ═══════════════════════════════════════════════════════════
+//  v2.0.0 – 公式ランチャー完全連携 & スマート自動回収 コマンド群
+// ═══════════════════════════════════════════════════════════
+
+/// マニフェストからローダー情報 + チューニング + 手動DLターゲットを抽出 (UI表示用)
+#[tauri::command]
+fn detect_manifest_info(manifest_json: String) -> Result<serde_json::Value, String> {
+    let m = ManifestV2::parse(&manifest_json)?;
+    let manual_targets: Vec<serde_json::Value> = m
+        .mods
+        .iter()
+        .filter(|e| e.download_url.is_none())
+        .map(|e| {
+            serde_json::json!({
+                "file_name": e.file_name,
+                "target_dir": e.target_dir,
+                "sha512": e.sha512,
+            })
+        })
+        .collect();
+    Ok(serde_json::json!({
+        "format_version": m.format_version,
+        "loader": m.loader,
+        "tuning": m.tuning,
+        "mod_count": m.mods.len(),
+        "manual_targets": manual_targets,
+    }))
+}
+
+/// MinecraftLauncher 起動チェック (UIで事前警告を表示するため)
+#[tauri::command]
+fn check_launcher_running_cmd() -> launcher::profiles::LauncherProcCheck {
+    launcher::profiles::check_launcher_running()
+}
+
+/// Java ランタイム探索 (内蔵ランタイム優先)
+#[tauri::command]
+async fn resolve_java(required_major: Option<u8>) -> Result<Option<launcher::java::JavaRuntime>, String> {
+    let major = required_major.unwrap_or(21);
+    Ok(match launcher::installer::find_java_runtime(major).await {
+        Some(rt) => Some(rt),
+        None => launcher::installer::find_best_java().await,
+    })
+}
+
+/// 型安全 JVM プラン生成 (UIの即時プレビュー用)
+/// ※ 生のJVM引数文字列は受け取らない — JvmTuning 構造体のみ
+#[tauri::command]
+fn plan_jvm_args(
+    tuning_json: Option<serde_json::Value>,
+    zgc_enabled: bool,
+    java_major: Option<u8>,
+) -> Result<JvmPlan, String> {
+    let tuning: crate::manifest::JvmTuning = match tuning_json {
+        Some(v) => serde_json::from_value(v).map_err(|e| format!("tuning の解析失敗: {}", e))?,
+        None => Default::default(),
+    };
+    let major = java_major.unwrap_or(tuning.recommended_java);
+    Ok(jvm::build_jvm_plan(&tuning, major, zgc_enabled, jvm::physical_ram_mb()))
+}
+
+/// 起動失敗時の自動フォールバック: G1GC 版プランを再生成 (公式 Java 遷移導線)
+#[tauri::command]
+fn plan_jvm_fallback(
+    tuning_json: Option<serde_json::Value>,
+    java_major: Option<u8>,
+) -> Result<JvmPlan, String> {
+    let tuning: crate::manifest::JvmTuning = match tuning_json {
+        Some(v) => serde_json::from_value(v).map_err(|e| format!("tuning の解析失敗: {}", e))?,
+        None => Default::default(),
+    };
+    let major = java_major.unwrap_or(tuning.recommended_java);
+    Ok(jvm::fallback_g1_plan(&tuning, major, jvm::physical_ram_mb()))
+}
+
+/// ローダーバージョン事前解決 (UI表示用)
+#[tauri::command]
+async fn resolve_loader_version(
+    loader: LoaderInfo,
+) -> Result<String, String> {
+    launcher::installer::resolve_loader_versions(&loader).await
+}
+
+/// 【ワンクリック同期】並行パイプライン実行 (ローダー導入 ∥ MODダウンロード → 原子的合体 → プロファイル追記)
+#[tauri::command]
+async fn run_launcher_sync(
+    app: AppHandle,
+    game_path: String,
+    manifest_json: String,
+    options: LauncherSyncOptions,
+) -> Result<launcher::pipeline::SyncSummary, String> {
+    let game_root = PathBuf::from(&game_path);
+    if !game_root.exists() || !game_root.is_dir() {
+        return Err(format!("指定されたゲームディレクトリが無効です: {}", game_path));
+    }
+    let manifest = ManifestV2::parse(&manifest_json)?;
+    launcher::pipeline::run_launcher_sync(app, game_root, manifest, options).await
+}
+
+/// ダウンロードフォルダ解決 (設定 > ブラウザPreferences > OS標準)
+#[tauri::command]
+fn resolve_download_dir_cmd(preferred: Option<String>) -> browser_paths::ResolvedDownloadDir {
+    browser_paths::resolve_download_dir(preferred)
+}
+
+/// 【自動回収】監視開始 (待機モーダルが開いている間のみ)
+#[tauri::command]
+fn start_download_watcher(
+    app: AppHandle,
+    targets_json: String,
+    watch_dir: Option<String>,
+    dest_root: String,
+    manager: tauri::State<'_, watcher::WatcherManager>,
+) -> Result<serde_json::Value, String> {
+    let targets: Vec<WatchTarget> = serde_json::from_str(&targets_json)
+        .map_err(|e| format!("監視対象の解析失敗: {}", e))?;
+    if targets.is_empty() {
+        return Err("監視対象MODがありません。".into());
+    }
+
+    let dir = match watch_dir.filter(|s| !s.trim().is_empty()) {
+        Some(d) => PathBuf::from(d),
+        None => {
+            // ブラウザ Preferences → OS標準 Downloads の順で自動特定
+            let resolved = browser_paths::resolve_download_dir(None);
+            PathBuf::from(resolved.path)
+        }
+    };
+
+    let session_id = format!("watch-{}", uuid::Uuid::new_v4().simple());
+    let dir_str = dir.to_string_lossy().to_string();
+    watcher::start_watcher(app, session_id.clone(), targets, dir, PathBuf::from(dest_root), manager.inner())?;
+
+    Ok(serde_json::json!({
+        "session_id": session_id,
+        "watch_dir": dir_str,
+    }))
+}
+
+/// 【自動回収】監視停止・破棄 (キャンセル時。常時監視は絶対禁止)
+#[tauri::command]
+fn stop_download_watcher(
+    session_id: String,
+    manager: tauri::State<'_, watcher::WatcherManager>,
+) -> Result<(), String> {
+    watcher::stop_watcher(&session_id, manager.inner())
+}
+
+/// 【フォールバック】ワンショット一括ハッシュ照合スキャン
+#[tauri::command]
+async fn scan_download_dir_once(
+    targets_json: String,
+    watch_dir: Option<String>,
+    dest_root: String,
+) -> Result<watcher::ScanResult, String> {
+    let targets: Vec<WatchTarget> = serde_json::from_str(&targets_json)
+        .map_err(|e| format!("監視対象の解析失敗: {}", e))?;
+    let dir = match watch_dir.filter(|s| !s.trim().is_empty()) {
+        Some(d) => PathBuf::from(d),
+        None => {
+            let resolved = browser_paths::resolve_download_dir(None);
+            PathBuf::from(resolved.path)
+        }
+    };
+    watcher::scan_once(dir, PathBuf::from(dest_root), targets).await
+}
+
+/// 【フォールバック】ファイル直接選択 / ドラッグ&ドロップで配置 (複数一括)
+#[tauri::command]
+async fn place_files_from_paths(
+    paths: Vec<String>,
+    targets_json: String,
+    dest_root: String,
+) -> Result<watcher::PlaceResult, String> {
+    let targets: Vec<WatchTarget> = serde_json::from_str(&targets_json)
+        .map_err(|e| format!("監視対象の解析失敗: {}", e))?;
+    let path_bufs: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
+    watcher::place_files(path_bufs, targets, PathBuf::from(dest_root)).await
+}
+
 // ── エントリポイント ─────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -722,6 +915,7 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .manage(watcher::WatcherManager::new())
         .invoke_handler(tauri::generate_handler![
             sync_mods,
             check_sync_diff,
@@ -732,7 +926,20 @@ pub fn run() {
             load_r2_config,
             clear_r2_config,
             read_file_content,
-            open_browser
+            open_browser,
+            // ── v2.0.0 ──
+            detect_manifest_info,
+            check_launcher_running_cmd,
+            resolve_java,
+            plan_jvm_args,
+            plan_jvm_fallback,
+            resolve_loader_version,
+            run_launcher_sync,
+            resolve_download_dir_cmd,
+            start_download_watcher,
+            stop_download_watcher,
+            scan_download_dir_once,
+            place_files_from_paths
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

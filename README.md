@@ -1,6 +1,6 @@
 # ModLinker
 
-![ModLinker](https://img.shields.io/badge/version-V1.0.0_Early_Access-blue)
+![ModLinker](https://img.shields.io/badge/version-V2.0.0-blue)
 ![Tauri](https://img.shields.io/badge/Tauri-v2-orange)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -12,6 +12,29 @@ MinecraftのMOD環境、一瞬でシンクロ。
 Minecraftでマルチプレイをする際、「参加者全員に同じMODを導入してもらう」のは非常に面倒です。
 ModLinkerは、この課題を解決するための次世代MOD同期ツールです。
 「配る側」はワンクリックで設計図（マニフェスト）を作成し、「受け取る側」はそれを読み込むだけで足りないMODだけを超高速で自動ダウンロードします。
+
+
+## 🚀 v2.0.0 の新機能
+
+### 1. 公式ランチャー完全連携 ＆ ワンクリック同期
+- **ローダー公式インストーラーのサイレント実行代行**: Fabric / Forge / NeoForge の公式インストーラーを取得し、バックグラウンドでサイレント実行。自前で複雑な起動JSONを生成しません。
+- **Java自動探索**: 公式ランチャー内蔵Java (`runtime/java-runtime-gamma` / `delta` 等) を優先探索。Java未導入環境でもエラーなしで完走させます。
+- **並行処理パイプライン**: 「ローダー導入 (CPU負荷)」と「MODダウンロード (回線負荷)」を tokio で並行実行し、`.staging/` に隔離 → 両方完了した瞬間に `rename` (0.01秒) で原子的合体。
+- **安全なgameDir分離**: 専用フォルダ `profiles/<ProfileName>/` を物理作成し、`launcher_profiles.json` に1プロファイルだけ安全に追記 (Append)。
+  - 🛡 **安全装置①**: 書き込み前に `MinecraftLauncher.exe` の起動を検知したら保存をブロック
+  - 🛡 **安全装置②**: 書き換え直前にタイムスタンプ付き `.bak` を自動生成
+- **🚀 ZGC自動最適化 (完全型安全)**: マニフェストから生のJVM引数文字列は受け取らず、型安全な構造体パラメータのみを解釈。
+  - Java 21 ＋ ZGCトグルON → 世代別ZGC (`-XX:+UseZGC -XX:+ZGenerational`)、メモリ最大16GB
+  - Java 17 以下 / フォールバック → 安定の G1GC、8GBキャップ
+  - 起動失敗時の公式Java/G1への自動フォールバックプランを生成
+
+### 2. スマート手動MOD自動回収 (ハイブリッド検知)
+Modrinth未登録 / CurseForge限定MODの入手が、これまでの「手動DL → 手動移動」から「手動DL → **自動配置**」に進化。
+- ブラウザでページを開くと 📥 **ダウンロード待機モーダル** が表示され、**このモーダルが開いている間だけ**ダウンロードフォルダを監視します (常時バックグラウンド監視は絶対に行いません)。
+- `.crdownload` / `.part` / `.tmp` ➔ `.jar` へのリネームを `notify` クレートでフック。
+- **SHA-512ハッシュが完全一致したファイルだけ** (ファイル名は見ません) を `mods/` 等へ即座に移動し、監視を即停止・破棄。ファイルロック中は数ミリ秒待機してリトライします。
+- **監視先の自動特定** (優先順位): アプリ内設定 ➔ Chrome / Edge / Brave / Arc / Opera / Opera GX の `Preferences` JSON ➔ OS標準 Downloads。
+- **フォールバック導線**: 監視先変更ボタン / 🔍 今すぐスキャン / 📂 ファイルを直接選択 / ドラッグ＆ドロップ (複数一括) を完備。Firefox や Tor でも確実に回収できます。
 
 ## ✨ 主な機能
 
